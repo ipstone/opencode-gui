@@ -39,6 +39,7 @@ dark.jsonc
 media/preview.png
 .npmrc
 pnpm-lock.yaml
+opencode.json
 uikit.html
 uikit.tsx
 uikit.css

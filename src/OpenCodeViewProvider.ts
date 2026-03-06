@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { execFile } from "child_process";
+import { randomBytes } from "crypto";
 import { OpenCodeService } from "./OpenCodeService";
 import { getLogger } from "./extension";
 import type {
@@ -557,24 +558,57 @@ export class OpenCodeViewProvider implements vscode.WebviewViewProvider {
   }
 
   private _getHtmlForWebview(webview: vscode.Webview) {
-    const devServerUrl = process.env.OPENCODE_DEV_SERVER_URL;
+    const rawDevServerUrl = process.env.OPENCODE_DEV_SERVER_URL;
 
-    if (devServerUrl) {
+    if (rawDevServerUrl) {
+      // Validate the dev server URL to prevent HTML/CSP injection via the environment variable.
+      // Only http and https origins on localhost/127.0.0.1 are permitted.
+      let devOrigin: string;
+      try {
+        const parsed = new URL(rawDevServerUrl);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+          throw new Error(`Unsupported protocol: ${parsed.protocol}`);
+        }
+        const hostname = parsed.hostname;
+        // URL.hostname for IPv6 addresses strips the brackets and normalizes to
+        // compressed form, so "http://[0:0:0:0:0:0:0:1]" → hostname "::1".
+        // The three checks below therefore cover all standard localhost representations.
+        if (hostname !== "localhost" && hostname !== "127.0.0.1" && hostname !== "::1") {
+          throw new Error(`Dev server must be on localhost, got: ${hostname}`);
+        }
+        devOrigin = parsed.origin; // safe: origin contains only scheme, host, and port
+      } catch (err) {
+        getLogger().error(
+          "OPENCODE_DEV_SERVER_URL is invalid or not a localhost URL – ignoring dev mode",
+          err,
+        );
+        // Fall through to production HTML
+        return this._getProductionHtml(webview);
+      }
+
+      // devOrigin is now a parsed, validated origin (e.g. "http://localhost:5173").
+      // It contains no HTML metacharacters by construction (URL.origin never includes
+      // quotes, angle brackets, or other injection-relevant characters).
       return `<!DOCTYPE html>
         <html lang="en">
         <head>
           <meta charset="UTF-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${devServerUrl}; script-src 'unsafe-inline' ${devServerUrl}; connect-src ${devServerUrl} ws://localhost:5173 http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:* ${webview.cspSource};">
+          <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${devOrigin}; script-src 'unsafe-inline' ${devOrigin}; connect-src ${devOrigin} ws://localhost:5173 http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:* ${webview.cspSource};">
           <title>OpenCode</title>
         </head>
         <body>
           <div id="root"></div>
-          <script type="module" src="${devServerUrl}/@vite/client"></script>
-          <script type="module" src="${devServerUrl}/src/webview/main.tsx"></script>
+          <script type="module" src="${devOrigin}/@vite/client"></script>
+          <script type="module" src="${devOrigin}/src/webview/main.tsx"></script>
         </body>
         </html>`;
     }
+
+    return this._getProductionHtml(webview);
+  }
+
+  private _getProductionHtml(webview: vscode.Webview) {
 
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this._extensionUri, "out", "main.js"),
@@ -603,11 +637,8 @@ export class OpenCodeViewProvider implements vscode.WebviewViewProvider {
 }
 
 function getNonce() {
-  let text = "";
-  const possible =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  for (let i = 0; i < 32; i++) {
-    text += possible.charAt(Math.floor(Math.random() * possible.length));
-  }
-  return text;
+  // Use Node.js crypto module for a cryptographically secure random nonce.
+  // Math.random() is NOT suitable here: a predictable nonce could be exploited
+  // to bypass the Content-Security-Policy set on the webview.
+  return randomBytes(16).toString("hex");
 }
